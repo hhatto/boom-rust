@@ -1,0 +1,16 @@
+[package]
+name = "boom"
+version = "0.1.0"
+authors = ["hhatto <hhatto.jp@gmail.com>"]
+
+[dependencies]
+getopts = "*"
+hyper = "*"
+time = "*"
+
+[dependencies.url]
+git = "https://github.com/servo/rust-url"
+
+[[bin]]
+name = "boom-rust"
+path = "src/main.rs"

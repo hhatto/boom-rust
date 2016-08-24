@@ -1,0 +1,204 @@
+extern crate boom;
+extern crate getopts;
+extern crate hyper;
+extern crate url;
+extern crate time;
+use getopts::Options;
+use hyper::Client;
+use hyper::method;
+use hyper::status::StatusCode;
+use hyper::header::{UserAgent, Connection, AcceptEncoding, Encoding, qitem, Headers};
+use std::str::FromStr;
+use std::{env, thread};
+use std::time::Duration;
+use std::io::prelude::*;
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{channel, Receiver};
+
+const N_DEFAULT: i32 = 200;
+const C_DEFAULT: i32 = 50;
+
+mod report;
+use report::Report;
+
+#[derive(Clone, Default)]
+struct BoomOption {
+    concurrency: i32,
+    num_requests: i32,
+    method: String,
+    url: String,
+    keepalive: bool,
+    compress: bool,
+}
+
+struct WorkerOption {
+    opts: BoomOption,
+    report: Arc<Mutex<Report>>,
+}
+
+fn get_request() -> Client {
+    let mut client = Client::new();
+    let timeout: Option<Duration> = Some(Duration::new(1, 0));
+    client.set_read_timeout(timeout);
+    return client;
+}
+
+// one request
+fn b(client: &Arc<Client>, options: BoomOption, report: Arc<Mutex<Report>>) -> bool {
+    let url = options.url.as_str();
+    let method = method::Method::from_str(options.method.as_str()).unwrap();
+    let mut req = client.request(method, url).header(UserAgent("boom-rust".to_string()));
+    if !options.keepalive {
+        req = req.header(Connection::close());
+    }
+    if options.compress {
+        let mut headers = Headers::new();
+        headers.set(AcceptEncoding(vec![qitem(Encoding::Gzip)]));
+        req = req.headers(headers);
+    }
+    let t1 = time::now();
+    let mut res = req.send().unwrap();
+    let t2 = time::now();
+    let diff = (t2 - t1).num_microseconds().unwrap() as f32;
+
+    {
+        let mut r = report.lock().unwrap();
+        let millisec = diff / 1000.;
+        (*r).time_total += millisec;
+        (*r).req_num += 1;
+        (*r).results.push((res.status.to_u16(), millisec));
+    }
+
+    if res.status != StatusCode::Ok {
+        let mut r = report.lock().unwrap();
+        let mut status_num = (*r).status_num.entry(res.status.to_u16()).or_insert(0);
+        *status_num += 1;
+        return false;
+    }
+
+    let mut body = vec![0 as u8; 0];
+    let content_len = res.read_to_end(&mut body).unwrap();
+    {
+        let mut r = report.lock().unwrap();
+        (*r).size_total += content_len as i64;
+    }
+
+    let mut r = report.lock().unwrap();
+    let mut status_num = (*r).status_num.entry(200).or_insert(0);
+    *status_num += 1;
+    return true;
+}
+
+// exec actions
+fn exec_boom(client: &Arc<Client>, options: BoomOption, report: Arc<Mutex<Report>>) {
+    Some(b(client, options, report));
+}
+
+fn exec_worker(client: &Arc<Client>, rx: Receiver<Option<WorkerOption>>) {
+    loop {
+        match rx.recv().unwrap() {
+            Some(wconf) => {
+                exec_boom(client, wconf.opts, wconf.report);
+            }
+            None => {
+                break;
+            }
+        }
+    }
+}
+
+fn print_usage(opts: Options) {
+    print!("{}", opts.usage("Usage: boom-rust [options] URL"));
+}
+
+fn main() {
+    let mut opt = BoomOption { ..BoomOption::default() };
+    let args: Vec<String> = env::args().collect();
+
+    let mut opts = Options::new();
+    opts.optopt("n", "loop", "scenario exec N-loop", "N");
+    opts.optopt("c", "concurrency", "concurrency", "C");
+    opts.optopt("m",
+                "method",
+                "HTTP method (GET, POST, PUT, DELETE, HEAD, OPTIONS)",
+                "METHOD");
+    opts.optflag("", "disable-compress", "Disable compress");
+    opts.optflag("", "disable-keepalive", "Disable keep-alive");
+    let matches = match opts.parse(&args[1..]) {
+        Ok(m) => m,
+        Err(_) => {
+            print_usage(opts);
+            return;
+        }
+    };
+
+    opt.concurrency = match matches.opt_str("c") {
+        Some(v) => i32::from_str_radix(&v, 10).unwrap(),
+        None => C_DEFAULT,
+    };
+    opt.num_requests = match matches.opt_str("n") {
+        Some(v) => i32::from_str_radix(&v, 10).unwrap(),
+        None => N_DEFAULT,
+    };
+    opt.method = match matches.opt_str("m") {
+        Some(v) => v.to_uppercase(),
+        None => "GET".to_string(),
+    };
+    opt.compress = !matches.opt_present("disable-compress");
+    opt.keepalive = !matches.opt_present("disable-keepalive");
+
+    opt.url = if !matches.free.is_empty() {
+        matches.free[0].clone()
+    } else {
+        print_usage(opts);
+        return;
+    };
+
+    let mut handles = vec![];
+    let mut workers = vec![];
+
+    let client = Arc::new(get_request());
+
+    // create worker
+    for _ in 0..opt.concurrency {
+        let (worker_tx, worker_rx) = channel::<Option<WorkerOption>>();
+        workers.push(worker_tx.clone());
+        let c = client.clone();
+        handles.push(thread::spawn(move || exec_worker(&c, worker_rx)));
+    }
+
+    let t1 = time::now();
+
+    let report = Arc::new(Mutex::new(Report::new()));
+    // request for attack
+    for cnt in 0..opt.num_requests {
+        let w = WorkerOption {
+            opts: opt.clone(),
+            report: report.clone(),
+        };
+        let offset = ((cnt as i32) % opt.concurrency) as usize;
+        let req = workers[offset].clone();
+        req.send(Some(w)).unwrap();
+    }
+
+    // exit for worker
+    for worker in workers {
+        worker.send(None).unwrap();
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    let t2 = time::now();
+    let diff = (t2 - t1).num_milliseconds() as f32;
+
+    let request_per_seconds = 1000. * opt.num_requests as f32 / diff;
+
+    {
+        let r = report.clone();
+        let mut report_mut = (*r).lock().unwrap();
+        report_mut.time_exec_total = diff;
+        report_mut.req_per_sec = request_per_seconds;
+        report_mut.finalize();
+    }
+}
