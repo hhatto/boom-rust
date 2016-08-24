@@ -5,7 +5,7 @@ extern crate url;
 extern crate time;
 use getopts::Options;
 use hyper::Client;
-use hyper::method;
+use hyper::method::Method;
 use hyper::status::StatusCode;
 use hyper::header::{UserAgent, Connection, AcceptEncoding, Encoding, qitem, Headers};
 use std::str::FromStr;
@@ -21,11 +21,11 @@ const C_DEFAULT: i32 = 50;
 mod report;
 use report::Report;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct BoomOption {
     concurrency: i32,
     num_requests: i32,
-    method: String,
+    method: Method,
     url: String,
     keepalive: bool,
     compress: bool,
@@ -45,9 +45,7 @@ fn get_request() -> Client {
 
 // one request
 fn b(client: &Arc<Client>, options: BoomOption, report: Arc<Mutex<Report>>) -> bool {
-    let url = options.url.as_str();
-    let method = method::Method::from_str(options.method.as_str()).unwrap();
-    let mut req = client.request(method, url).header(UserAgent("boom-rust".to_string()));
+    let mut req = client.request(options.method, options.url.as_str()).header(UserAgent("boom-rust".to_string()));
     if !options.keepalive {
         req = req.header(Connection::close());
     }
@@ -112,16 +110,20 @@ fn print_usage(opts: Options) {
 }
 
 fn main() {
-    let mut opt = BoomOption { ..BoomOption::default() };
+    let mut opt = BoomOption {
+        concurrency: 0,
+        num_requests: 0,
+        method: Method::Get,
+        url: "".to_string(),
+        keepalive: true,
+        compress: true,
+    };
     let args: Vec<String> = env::args().collect();
 
     let mut opts = Options::new();
     opts.optopt("n", "loop", "scenario exec N-loop", "N");
     opts.optopt("c", "concurrency", "concurrency", "C");
-    opts.optopt("m",
-                "method",
-                "HTTP method (GET, POST, PUT, DELETE, HEAD, OPTIONS)",
-                "METHOD");
+    opts.optopt("m", "method", "HTTP method (GET, POST, PUT, DELETE, HEAD, OPTIONS)", "METHOD");
     opts.optflag("", "disable-compress", "Disable compress");
     opts.optflag("", "disable-keepalive", "Disable keep-alive");
     let matches = match opts.parse(&args[1..]) {
@@ -140,19 +142,19 @@ fn main() {
         Some(v) => i32::from_str_radix(&v, 10).unwrap(),
         None => N_DEFAULT,
     };
-    opt.method = match matches.opt_str("m") {
+    let method_v = match matches.opt_str("m") {
         Some(v) => v.to_uppercase(),
         None => "GET".to_string(),
     };
+    opt.method = Method::from_str(method_v.as_str()).unwrap();
     opt.compress = !matches.opt_present("disable-compress");
     opt.keepalive = !matches.opt_present("disable-keepalive");
 
-    opt.url = if !matches.free.is_empty() {
-        matches.free[0].clone()
-    } else {
+    if matches.free.is_empty() {
         print_usage(opts);
         return;
     };
+    opt.url = matches.free[0].clone();
 
     let mut handles = vec![];
     let mut workers = vec![];
