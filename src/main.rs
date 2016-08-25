@@ -192,14 +192,14 @@ fn main() {
         handle.join().unwrap();
     }
     let t2 = time::now();
-    let diff = (t2 - t1).num_milliseconds() as f32;
+    let diff = (t2 - t1).num_microseconds().unwrap() as f32;
 
-    let request_per_seconds = 1000. * opt.num_requests as f32 / diff;
+    let request_per_seconds = 1000000. * opt.num_requests as f32 / diff;
 
     {
         let r = report.clone();
         let mut report_mut = (*r).lock().unwrap();
-        report_mut.time_exec_total = diff;
+        report_mut.time_exec_total = diff / 1000.;
         report_mut.req_per_sec = request_per_seconds;
         report_mut.finalize();
     }
