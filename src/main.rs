@@ -7,12 +7,14 @@ extern crate mime;
 use getopts::Options;
 use mime::Mime;
 use hyper::Client;
+use hyper::client::Body;
 use hyper::method::Method;
 use hyper::status::StatusCode;
 use hyper::header::{UserAgent, Connection, AcceptEncoding, Encoding, qitem, Headers, ContentType};
 use std::str::FromStr;
 use std::{env, thread};
 use std::time::Duration;
+use std::io::Cursor;
 use std::io::prelude::*;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{channel, Receiver};
@@ -29,6 +31,7 @@ struct BoomOption {
     num_requests: i32,
     method: Method,
     url: String,
+    body: String,
     keepalive: bool,
     compress: bool,
     mime: Mime,
@@ -48,16 +51,23 @@ fn get_request() -> Client {
 
 // one request
 fn b(client: &Arc<Client>, options: BoomOption, report: Arc<Mutex<Report>>) -> bool {
+    let request_body = options.body.clone();
+    let mut cursor: Cursor<&[u8]> = Cursor::new(request_body.as_bytes());
+    let mut headers = Headers::new();
     let mut req = client.request(options.method, options.url.as_str()).header(UserAgent("boom-rust".to_string()));
     if !options.keepalive {
         req = req.header(Connection::close());
     }
-    let mut headers = Headers::new();
+    if !options.body.is_empty() {
+        req = req.body(Body::SizedBody(&mut cursor, options.body.len() as u64));
+    }
     headers.set(ContentType(options.mime));
     if options.compress {
         headers.set(AcceptEncoding(vec![qitem(Encoding::Gzip)]));
-        req = req.headers(headers);
     }
+
+    req = req.headers(headers);
+
     let t1 = time::now();
     let mut res = req.send().unwrap();
     let t2 = time::now();
@@ -120,6 +130,7 @@ fn main() {
     opts.optopt("n", "loop", "scenario exec N-loop", "N");
     opts.optopt("c", "concurrency", "concurrency", "C");
     opts.optopt("m", "method", "HTTP method (GET, POST, PUT, DELETE, HEAD, OPTIONS)", "METHOD");
+    opts.optopt("d", "data", "HTTP request body data", "DATA");
     opts.optopt("T", "", "Content-type, defaults to \"text/html\".", "ContentType");
     opts.optflag("", "disable-compress", "Disable compress");
     opts.optflag("", "disable-keepalive", "Disable keep-alive");
@@ -139,11 +150,16 @@ fn main() {
         Some(v) => v.to_uppercase(),
         None => "GET".to_string(),
     };
+    let body_v = match matches.opt_str("d") {
+        Some(v) => v.to_string(),
+        None => "".to_string(),
+    };
     let mut opt = BoomOption {
         concurrency: 0,
         num_requests: 0,
         method: Method::from_str(method_v.as_str()).unwrap(),
-        url: "".to_string(),
+        url: matches.free[0].clone(),
+        body: body_v,
         mime: Mime::from_str(mime_v.as_str()).unwrap(),
         keepalive: !matches.opt_present("disable-keepalive"),
         compress: !matches.opt_present("disable-compress"),
@@ -160,7 +176,6 @@ fn main() {
         print_usage(opts);
         return;
     };
-    opt.url = matches.free[0].clone();
 
     let mut handles = vec![];
     let mut workers = vec![];
