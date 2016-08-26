@@ -1,0 +1,14 @@
+language: rust
+rust:
+    - nightly
+    - beta
+    - stable
+
+sudo: false
+
+script:
+    - cargo build --verbose $FEATURES
+    - cargo test --verbose $FEATURES --no-fail-fast
+
+notifications:
+    email: false
