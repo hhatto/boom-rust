@@ -141,6 +141,10 @@ fn main() {
             return;
         }
     };
+    if matches.free.len() < 1 {
+        print_usage(opts);
+        return;
+    }
 
     let mime_v = match matches.opt_str("T") {
         Some(v) => v,
