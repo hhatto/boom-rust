@@ -35,6 +35,8 @@ struct BoomOption {
     body: String,
     username: String,
     password: String,
+    proxy_host: String,
+    proxy_port: u16,
     keepalive: bool,
     compress: bool,
     mime: Mime,
@@ -45,8 +47,12 @@ struct WorkerOption {
     report: Arc<Mutex<Report>>,
 }
 
-fn get_request() -> Client {
-    let mut client = Client::new();
+fn get_request(options: &BoomOption) -> Client {
+    let mut client = if options.proxy_host.is_empty() {
+        Client::new()
+    } else {
+        Client::with_http_proxy(options.proxy_host.to_owned(), options.proxy_port)
+    };
     let timeout: Option<Duration> = Some(Duration::new(1, 0));
     client.set_read_timeout(timeout);
     return client;
@@ -69,12 +75,10 @@ fn b(client: &Arc<Client>, options: BoomOption, report: Arc<Mutex<Report>>) -> b
         headers.set(AcceptEncoding(vec![qitem(Encoding::Gzip)]));
     }
     if !options.username.is_empty() {
-        headers.set(Authorization(
-                Basic {
-                    username: options.username,
-                    password: Some(options.password)
-                }
-                ));
+        headers.set(Authorization(Basic {
+            username: options.username,
+            password: Some(options.password),
+        }));
     }
 
     req = req.headers(headers);
@@ -144,6 +148,7 @@ fn main() {
     opts.optopt("d", "data", "HTTP request body data", "DATA");
     opts.optopt("T", "", "Content-type, defaults to \"text/html\".", "ContentType");
     opts.optopt("a", "", "use basic authentication", "USERNAME:PASSWORD");
+    opts.optopt("x", "", "HTTP proxy address as host:port", "PROXY_HOST:PROXY_PORT");
     opts.optflag("", "disable-compress", "Disable compress");
     opts.optflag("", "disable-keepalive", "Disable keep-alive");
     let matches = match opts.parse(&args[1..]) {
@@ -181,8 +186,29 @@ fn main() {
                 (s[0].to_string(), s[1].to_string())
             };
             ret
-        },
+        }
         None => ("".to_string(), "".to_string()),
+    };
+    let (proxy_host, proxy_port) = match matches.opt_str("x") {
+        Some(v) => {
+            let s: Vec<&str> = v.split(':').collect();
+            let ret: (String, u16) = if s.len() != 2 {
+                println!("invalid argument: {}\n", v);
+                print_usage(opts);
+                process::exit(1);
+            } else {
+                match u16::from_str_radix(s[1], 10) {
+                    Ok(v) => (s[0].to_string(), v),
+                    Err(_) => {
+                        println!("invalid proxy address: {}\n", v);
+                        print_usage(opts);
+                        process::exit(1);
+                    }
+                }
+            };
+            ret
+        }
+        None => ("".to_string(), 0),
     };
     let mut opt = BoomOption {
         concurrency: 0,
@@ -192,6 +218,8 @@ fn main() {
         body: body_v,
         username: basic_auth_name,
         password: basic_auth_pass,
+        proxy_host: proxy_host,
+        proxy_port: proxy_port,
         mime: Mime::from_str(mime_v.as_str()).unwrap(),
         keepalive: !matches.opt_present("disable-keepalive"),
         compress: !matches.opt_present("disable-compress"),
@@ -212,7 +240,7 @@ fn main() {
     let mut handles = vec![];
     let mut workers = vec![];
 
-    let client = Arc::new(get_request());
+    let client = Arc::new(get_request(&opt));
 
     // create worker
     for _ in 0..opt.concurrency {
