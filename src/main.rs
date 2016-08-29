@@ -10,10 +10,11 @@ use hyper::Client;
 use hyper::client::Body;
 use hyper::method::Method;
 use hyper::status::StatusCode;
-use hyper::header::{UserAgent, Connection, AcceptEncoding, Encoding, qitem, Headers, ContentType};
+use hyper::header::{UserAgent, Connection, AcceptEncoding, Encoding, qitem, Headers, ContentType, Authorization, Basic};
 use std::str::FromStr;
 use std::{env, thread};
 use std::time::Duration;
+use std::process;
 use std::io::Cursor;
 use std::io::prelude::*;
 use std::sync::{Arc, Mutex};
@@ -32,6 +33,8 @@ struct BoomOption {
     method: Method,
     url: String,
     body: String,
+    username: String,
+    password: String,
     keepalive: bool,
     compress: bool,
     mime: Mime,
@@ -64,6 +67,14 @@ fn b(client: &Arc<Client>, options: BoomOption, report: Arc<Mutex<Report>>) -> b
     headers.set(ContentType(options.mime));
     if options.compress {
         headers.set(AcceptEncoding(vec![qitem(Encoding::Gzip)]));
+    }
+    if !options.username.is_empty() {
+        headers.set(Authorization(
+                Basic {
+                    username: options.username,
+                    password: Some(options.password)
+                }
+                ));
     }
 
     req = req.headers(headers);
@@ -132,6 +143,7 @@ fn main() {
     opts.optopt("m", "method", "HTTP method (GET, POST, PUT, DELETE, HEAD, OPTIONS)", "METHOD");
     opts.optopt("d", "data", "HTTP request body data", "DATA");
     opts.optopt("T", "", "Content-type, defaults to \"text/html\".", "ContentType");
+    opts.optopt("a", "", "use basic authentication", "USERNAME:PASSWORD");
     opts.optflag("", "disable-compress", "Disable compress");
     opts.optflag("", "disable-keepalive", "Disable keep-alive");
     let matches = match opts.parse(&args[1..]) {
@@ -158,12 +170,28 @@ fn main() {
         Some(v) => v.to_string(),
         None => "".to_string(),
     };
+    let (basic_auth_name, basic_auth_pass) = match matches.opt_str("a") {
+        Some(v) => {
+            let s: Vec<&str> = v.split(':').collect();
+            let ret: (String, String) = if s.len() != 2 {
+                println!("invalid argument: {}\n", v);
+                print_usage(opts);
+                process::exit(1);
+            } else {
+                (s[0].to_string(), s[1].to_string())
+            };
+            ret
+        },
+        None => ("".to_string(), "".to_string()),
+    };
     let mut opt = BoomOption {
         concurrency: 0,
         num_requests: 0,
         method: Method::from_str(method_v.as_str()).unwrap(),
         url: matches.free[0].clone(),
         body: body_v,
+        username: basic_auth_name,
+        password: basic_auth_pass,
         mime: Mime::from_str(mime_v.as_str()).unwrap(),
         keepalive: !matches.opt_present("disable-keepalive"),
         compress: !matches.opt_present("disable-compress"),
