@@ -136,7 +136,6 @@ fn exec_worker(client: &Arc<Client>, rx: Receiver<Option<WorkerOption>>) {
 
 fn print_usage(opts: Options) {
     print!("{}", opts.usage("Usage: boom-rust [options] URL"));
-    print!("{}", opts.short_usage("boom-rust"));
 }
 
 fn main() {
