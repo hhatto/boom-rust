@@ -136,13 +136,14 @@ fn exec_worker(client: &Arc<Client>, rx: Receiver<Option<WorkerOption>>) {
 
 fn print_usage(opts: Options) {
     print!("{}", opts.usage("Usage: boom-rust [options] URL"));
+    print!("{}", opts.short_usage("boom-rust"));
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
     let mut opts = Options::new();
-    opts.optopt("n", "loop", "scenario exec N-loop", "N");
+    opts.optopt("n", "num", "number of requests", "N");
     opts.optopt("c", "concurrency", "concurrency", "C");
     opts.optopt("m", "method", "HTTP method (GET, POST, PUT, DELETE, HEAD, OPTIONS)", "METHOD");
     opts.optopt("d", "data", "HTTP request body data", "DATA");
