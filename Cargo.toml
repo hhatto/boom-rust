@@ -8,6 +8,7 @@ getopts = "*"
 hyper = "*"
 time = "*"
 mime = "*"
+crossbeam = "0.2"
 
 [dependencies.url]
 git = "https://github.com/servo/rust-url"

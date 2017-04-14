@@ -4,6 +4,7 @@ extern crate hyper;
 extern crate url;
 extern crate time;
 extern crate mime;
+extern crate crossbeam;
 use getopts::Options;
 use mime::Mime;
 use hyper::Client;
@@ -12,13 +13,14 @@ use hyper::method::Method;
 use hyper::status::StatusCode;
 use hyper::header::{UserAgent, Connection, AcceptEncoding, Encoding, qitem, Headers, ContentType, Authorization, Basic};
 use std::str::FromStr;
-use std::{env, thread};
+use std::env;
 use std::time::Duration;
 use std::process;
 use std::io::Cursor;
 use std::io::prelude::*;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{channel, Receiver};
+use crossbeam::scope;
 
 const N_DEFAULT: i32 = 200;
 const C_DEFAULT: i32 = 50;
@@ -237,51 +239,56 @@ fn main() {
         return;
     };
 
-    let mut handles = vec![];
-    let mut workers = vec![];
+    let mut t1 = time::now();
 
-    let client = Arc::new(get_request(&opt));
+    scope(|s| {
+        let mut handles = vec![];
+        let mut workers = vec![];
 
-    // create worker
-    for _ in 0..opt.concurrency {
-        let (worker_tx, worker_rx) = channel::<Option<WorkerOption>>();
-        workers.push(worker_tx.clone());
-        let c = client.clone();
-        handles.push(thread::spawn(move || exec_worker(&c, worker_rx)));
-    }
+        let client = Arc::new(get_request(&opt));
 
-    let t1 = time::now();
+        // create worker
+        for _ in 0..opt.concurrency {
+            let (worker_tx, worker_rx) = channel::<Option<WorkerOption>>();
+            workers.push(worker_tx.clone());
+            let c = client.clone();
+            handles.push(s.spawn(move || exec_worker(&c, worker_rx)));
+        }
 
-    let report = Arc::new(Mutex::new(Report::new()));
-    // request for attack
-    for cnt in 0..opt.num_requests {
-        let w = WorkerOption {
-            opts: opt.clone(),
-            report: report.clone(),
-        };
-        let offset = ((cnt as i32) % opt.concurrency) as usize;
-        let req = workers[offset].clone();
-        req.send(Some(w)).unwrap();
-    }
+        t1 = time::now();
 
-    // exit for worker
-    for worker in workers {
-        worker.send(None).unwrap();
-    }
+        let report = Arc::new(Mutex::new(Report::new()));
+        // request for attack
+        for cnt in 0..opt.num_requests {
+            let w = WorkerOption {
+                opts: opt.clone(),
+                report: report.clone(),
+            };
+            let offset = ((cnt as i32) % opt.concurrency) as usize;
+            let req = workers[offset].clone();
+            req.send(Some(w)).unwrap();
+        }
 
-    for handle in handles {
-        handle.join().unwrap();
-    }
-    let t2 = time::now();
-    let diff = (t2 - t1).num_microseconds().unwrap() as f32;
+        // exit for worker
+        for worker in workers {
+            worker.send(None).unwrap();
+        }
 
-    let request_per_seconds = 1000000. * opt.num_requests as f32 / diff;
+        for handle in handles {
+            handle.join();
+        }
 
-    {
-        let r = report.clone();
-        let mut report_mut = (*r).lock().unwrap();
-        report_mut.time_exec_total = diff / 1000.;
-        report_mut.req_per_sec = request_per_seconds;
-        report_mut.finalize();
-    }
+        let t2 = time::now();
+        let diff = (t2 - t1).num_microseconds().unwrap() as f32;
+
+        let request_per_seconds = 1000000. * opt.num_requests as f32 / diff;
+
+        {
+            let r = report.clone();
+            let mut report_mut = (*r).lock().unwrap();
+            report_mut.time_exec_total = diff / 1000.;
+            report_mut.req_per_sec = request_per_seconds;
+            report_mut.finalize();
+        }
+    });
 }
