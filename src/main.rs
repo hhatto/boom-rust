@@ -63,9 +63,10 @@ fn b(client: &Arc<Client>, options: BoomOption, report: Arc<Mutex<Report>>) -> b
     let request_body = options.body.clone();
     let mut cursor: Cursor<&[u8]> = Cursor::new(request_body.as_bytes());
     let mut headers = Headers::new();
-    let mut req = client.request(options.method, options.url.as_str()).header(UserAgent("boom-rust".to_string()));
+    let mut req = client.request(options.method, options.url.as_str());
+    headers.set(UserAgent("boom-rust".to_string()));
     if !options.keepalive {
-        req = req.header(Connection::close());
+        headers.set(Connection::close());
     }
     if !options.body.is_empty() {
         req = req.body(Body::SizedBody(&mut cursor, options.body.len() as u64));
