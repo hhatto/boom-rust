@@ -1,7 +1,5 @@
-extern crate boom;
 extern crate getopts;
 extern crate hyper;
-extern crate url;
 extern crate time;
 extern crate mime;
 use getopts::Options;
@@ -85,7 +83,7 @@ fn b(client: &Arc<Client>, options: BoomOption, report: Arc<Mutex<Report>>) -> b
     req = req.headers(headers);
 
     let t1 = time::now();
-    let mut res = req.send().unwrap();
+    let mut res = req.send().expect("req.send() error:");
     let t2 = time::now();
     let diff = (t2 - t1).num_microseconds().unwrap() as f32;
 
@@ -99,20 +97,20 @@ fn b(client: &Arc<Client>, options: BoomOption, report: Arc<Mutex<Report>>) -> b
 
     if res.status != StatusCode::Ok {
         let mut r = report.lock().unwrap();
-        let mut status_num = (*r).status_num.entry(res.status.to_u16()).or_insert(0);
+        let status_num = (*r).status_num.entry(res.status.to_u16()).or_insert(0);
         *status_num += 1;
         return false;
     }
 
     let mut body = vec![0 as u8; 0];
-    let content_len = res.read_to_end(&mut body).unwrap();
+    let content_len = res.read_to_end(&mut body).expect("response.read_to_end() error:");
     {
         let mut r = report.lock().unwrap();
         (*r).size_total += content_len as i64;
     }
 
     let mut r = report.lock().unwrap();
-    let mut status_num = (*r).status_num.entry(200).or_insert(0);
+    let status_num = (*r).status_num.entry(200).or_insert(0);
     *status_num += 1;
     return true;
 }
@@ -124,7 +122,7 @@ fn exec_boom(client: &Arc<Client>, options: BoomOption, report: Arc<Mutex<Report
 
 fn exec_worker(client: &Arc<Client>, rx: Receiver<Option<WorkerOption>>) {
     loop {
-        match rx.recv().unwrap() {
+        match rx.recv().expect("rx.recv() error:") {
             Some(wconf) => {
                 exec_boom(client, wconf.opts, wconf.report);
             }
@@ -262,16 +260,16 @@ fn main() {
         };
         let offset = ((cnt as i32) % opt.concurrency) as usize;
         let req = workers[offset].clone();
-        req.send(Some(w)).unwrap();
+        req.send(Some(w)).expect("request.send() error:");
     }
 
     // exit for worker
     for worker in workers {
-        worker.send(None).unwrap();
+        worker.send(None).expect("worker.send(None) error:");
     }
 
     for handle in handles {
-        handle.join().unwrap();
+        handle.join().expect("thread.join() error:");
     }
     let t2 = time::now();
     let diff = (t2 - t1).num_microseconds().unwrap() as f32;
