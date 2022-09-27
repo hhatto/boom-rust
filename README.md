@@ -1,4 +1,4 @@
-# boom-rust [![](https://travis-ci.org/hhatto/boom-rust.svg?branch=master)](https://travis-ci.org/hhatto/boom-rust)
+# boom-rust [![build](https://github.com/hhatto/boom-rust/actions/workflows/build.yml/badge.svg)](https://github.com/hhatto/boom-rust/actions/workflows/build.yml)
 
 Rust implementation of [boom](https://github.com/rakyll/boom).
 
