@@ -2,12 +2,15 @@
 name = "boom"
 version = "0.1.2"
 authors = ["hhatto <hhatto.jp@gmail.com>"]
+edition = "2021"
 
 [dependencies]
+hyper = { version = "0.14", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
 getopts = "*"
-hyper = "*"
 time = "*"
 mime = "*"
+base64 = "*"
 
 [dependencies.url]
 git = "https://github.com/servo/rust-url"
