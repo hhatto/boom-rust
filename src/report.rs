@@ -120,8 +120,16 @@ impl Report {
 
     pub fn finalize(&mut self) {
         self.results.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        self.time_average = self.time_total / self.req_num as f32;
-        self.size_per_req = self.size_total / self.req_num as i64;
+        self.time_average = if self.req_num == 0 {
+            0.
+        } else {
+            self.time_total / self.req_num as f32
+        };
+        self.size_per_req = if self.req_num == 0 {
+            0
+        } else {
+            self.size_total / self.req_num as i64
+        };
         self.print();
     }
 }

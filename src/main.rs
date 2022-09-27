@@ -1,22 +1,16 @@
-extern crate getopts;
-extern crate hyper;
-extern crate time;
-extern crate mime;
-use getopts::Options;
-use mime::Mime;
-use hyper::Client;
-use hyper::client::Body;
-use hyper::method::Method;
-use hyper::status::StatusCode;
-use hyper::header::{UserAgent, Connection, AcceptEncoding, Encoding, qitem, Headers, ContentType, Authorization, Basic};
 use std::str::FromStr;
 use std::{env, thread};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use std::process;
-use std::io::Cursor;
-use std::io::prelude::*;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{channel, Receiver};
+use base64;
+use getopts::Options;
+use mime::Mime;
+use hyper::body::HttpBody;
+use hyper::{Body, Client, Method, Request};
+use hyper::client::connect::HttpConnector;
+use hyper::header::{HeaderName, HeaderValue};
 
 const N_DEFAULT: i32 = 200;
 const C_DEFAULT: i32 = 50;
@@ -45,65 +39,70 @@ struct WorkerOption {
     report: Arc<Mutex<Report>>,
 }
 
-fn get_request(options: &BoomOption) -> Client {
-    let mut client = if options.proxy_host.is_empty() {
-        Client::new()
-    } else {
-        Client::with_http_proxy(options.proxy_host.to_owned(), options.proxy_port)
-    };
-    let timeout: Option<Duration> = Some(Duration::new(1, 0));
-    client.set_read_timeout(timeout);
+fn get_request(options: &BoomOption) -> Client<HttpConnector> {
+    // TODO: support proxy and timeout
+
+    // let mut client = if options.proxy_host.is_empty() {
+    //     Client::new()
+    // } else {
+    //     Client::with_http_proxy(options.proxy_host.to_owned(), options.proxy_port)
+    // };
+    let client = Client::new();
+    // let timeout: Option<Duration> = Some(Duration::new(1, 0));
+    // client.set_connect_timeout(timeout);
     return client;
 }
 
 // one request
-fn b(client: &Arc<Client>, options: BoomOption, report: Arc<Mutex<Report>>) -> bool {
-    let request_body = options.body.clone();
-    let mut cursor: Cursor<&[u8]> = Cursor::new(request_body.as_bytes());
-    let mut headers = Headers::new();
-    let mut req = client.request(options.method, options.url.as_str());
-    headers.set(UserAgent("boom-rust".to_string()));
+async fn b(client: &Arc<Client<HttpConnector>>, options: BoomOption, report: Arc<Mutex<Report>>) -> bool {
+    let request_body = if options.body.is_empty() {
+        Body::empty()
+    } else {
+        Body::from(options.body.clone())
+    };
+    let mut request = Request::builder()
+        .method(options.method)
+        .uri(options.url.as_str())
+        .body(request_body)
+        .unwrap();
+    request.headers_mut().insert(HeaderName::from_static("user-agent"), HeaderValue::from_static("boom-rust"));
     if !options.keepalive {
-        headers.set(Connection::close());
+        request.headers_mut().insert(HeaderName::from_static("connection"), HeaderValue::from_static("close"));
     }
-    if !options.body.is_empty() {
-        req = req.body(Body::SizedBody(&mut cursor, options.body.len() as u64));
-    }
-    headers.set(ContentType(options.mime));
+    request.headers_mut().insert(HeaderName::from_static("content-type"), HeaderValue::from_str(options.mime.as_ref()).unwrap());
     if options.compress {
-        headers.set(AcceptEncoding(vec![qitem(Encoding::Gzip)]));
+        request.headers_mut().insert(HeaderName::from_static("accept-encoding"), HeaderValue::from_static("gzip"));
     }
     if !options.username.is_empty() {
-        headers.set(Authorization(Basic {
-            username: options.username,
-            password: Some(options.password),
-        }));
+        let b64 = base64::encode(format!("{}:{}", options.username, options.password));
+        request.headers_mut().insert(HeaderName::from_static("authorization"), HeaderValue::from_str(format!("Basic {}", b64).as_str()).unwrap());
     }
 
-    req = req.headers(headers);
-
-    let t1 = time::now();
-    let mut res = req.send().expect("req.send() error:");
-    let t2 = time::now();
-    let diff = (t2 - t1).num_microseconds().unwrap() as f32;
+    let t1 = SystemTime::now();
+    let res = client.request(request).await.unwrap();
+    let t2 = SystemTime::now();
+    let duration = t2.duration_since(t1).unwrap();
+    let diff = duration.subsec_micros() as f32;
 
     {
         let mut r = report.lock().unwrap();
         let millisec = diff / 1000.;
         (*r).time_total += millisec;
         (*r).req_num += 1;
-        (*r).results.push((res.status.to_u16(), millisec));
+        (*r).results.push((res.status().as_u16(), millisec));
     }
 
-    if res.status != StatusCode::Ok {
+    if res.status().as_u16() != 200 {
         let mut r = report.lock().unwrap();
-        let status_num = (*r).status_num.entry(res.status.to_u16()).or_insert(0);
+        let status_num = (*r).status_num.entry(res.status().as_u16()).or_insert(0);
         *status_num += 1;
         return false;
     }
 
-    let mut body = vec![0 as u8; 0];
-    let content_len = res.read_to_end(&mut body).expect("response.read_to_end() error:");
+    let content_len = match res.body().size_hint().upper() {
+        Some(v) => v,
+        None => 1025,  // TODO: error handling
+    };
     {
         let mut r = report.lock().unwrap();
         (*r).size_total += content_len as i64;
@@ -116,15 +115,15 @@ fn b(client: &Arc<Client>, options: BoomOption, report: Arc<Mutex<Report>>) -> b
 }
 
 // exec actions
-fn exec_boom(client: &Arc<Client>, options: BoomOption, report: Arc<Mutex<Report>>) {
-    Some(b(client, options, report));
+async fn exec_boom(client: &Arc<Client<HttpConnector>>, options: BoomOption, report: Arc<Mutex<Report>>) {
+    Some(b(client, options, report).await);
 }
 
-fn exec_worker(client: &Arc<Client>, rx: Receiver<Option<WorkerOption>>) {
+async fn exec_worker(client: &Arc<Client<HttpConnector>>, rx: Receiver<Option<WorkerOption>>) {
     loop {
         match rx.recv().expect("rx.recv() error:") {
             Some(wconf) => {
-                exec_boom(client, wconf.opts, wconf.report);
+                exec_boom(client, wconf.opts, wconf.report).await;
             }
             None => {
                 break;
@@ -133,11 +132,12 @@ fn exec_worker(client: &Arc<Client>, rx: Receiver<Option<WorkerOption>>) {
     }
 }
 
-fn print_usage(opts: Options) {
+fn print_usage(opts: &Options) {
     print!("{}", opts.usage("Usage: boom-rust [options] URL"));
 }
 
-fn main() {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Vec<String> = env::args().collect();
 
     let mut opts = Options::new();
@@ -151,15 +151,21 @@ fn main() {
     opts.optflag("", "disable-compress", "Disable compress");
     opts.optflag("", "disable-keepalive", "Disable keep-alive");
     let matches = match opts.parse(&args[1..]) {
-        Ok(m) => m,
+        Ok(m) => Some(m),
         Err(_) => {
-            print_usage(opts);
-            return;
+            print_usage(&opts);
+            None
         }
     };
+    if matches.is_none() {
+        std::process::exit(1)
+    }
+
+    let matches = matches.unwrap();
+
     if matches.free.len() < 1 {
-        print_usage(opts);
-        return;
+        print_usage(&opts);
+        std::process::exit(1)
     }
 
     let mime_v = match matches.opt_str("T") {
@@ -179,7 +185,7 @@ fn main() {
             let s: Vec<&str> = v.split(':').collect();
             let ret: (String, String) = if s.len() != 2 {
                 println!("invalid argument: {}\n", v);
-                print_usage(opts);
+                print_usage(&opts);
                 process::exit(1);
             } else {
                 (s[0].to_string(), s[1].to_string())
@@ -193,14 +199,14 @@ fn main() {
             let s: Vec<&str> = v.split(':').collect();
             let ret: (String, u16) = if s.len() != 2 {
                 println!("invalid argument: {}\n", v);
-                print_usage(opts);
+                print_usage(&opts);
                 process::exit(1);
             } else {
                 match u16::from_str_radix(s[1], 10) {
                     Ok(v) => (s[0].to_string(), v),
                     Err(_) => {
                         println!("invalid proxy address: {}\n", v);
-                        print_usage(opts);
+                        print_usage(&opts);
                         process::exit(1);
                     }
                 }
@@ -232,8 +238,8 @@ fn main() {
         None => N_DEFAULT,
     };
     if matches.free.is_empty() {
-        print_usage(opts);
-        return;
+        print_usage(&opts);
+        std::process::exit(1)
     };
 
     let mut handles = vec![];
@@ -246,10 +252,19 @@ fn main() {
         let (worker_tx, worker_rx) = channel::<Option<WorkerOption>>();
         workers.push(worker_tx.clone());
         let c = client.clone();
-        handles.push(thread::spawn(move || exec_worker(&c, worker_rx)));
+        // handles.push(thread::spawn(move || exec_worker(&c, worker_rx)));
+        handles.push(thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                exec_worker(&c, worker_rx).await
+            });
+        }));
     }
 
-    let t1 = time::now();
+    let t1 = SystemTime::now();
 
     let report = Arc::new(Mutex::new(Report::new()));
     // request for attack
@@ -271,8 +286,9 @@ fn main() {
     for handle in handles {
         handle.join().expect("thread.join() error:");
     }
-    let t2 = time::now();
-    let diff = (t2 - t1).num_microseconds().unwrap() as f32;
+    let t2 = SystemTime::now();
+    let duration = t2.duration_since(t1).unwrap();
+    let diff = duration.subsec_micros() as f32;
 
     let request_per_seconds = 1000000. * opt.num_requests as f32 / diff;
 
@@ -283,4 +299,6 @@ fn main() {
         report_mut.req_per_sec = request_per_seconds;
         report_mut.finalize();
     }
+
+    Ok(())
 }
